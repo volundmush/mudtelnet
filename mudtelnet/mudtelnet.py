@@ -4,7 +4,7 @@ from enum import IntEnum
 from collections import defaultdict
 
 
-class _TC:
+class TC(IntEnum):
     NULL = 0
     BEL = 7
     CR = 13
@@ -44,12 +44,22 @@ class _TC:
     MSDP = 69
 
     # TTYPE - Terminal Type
-    TTYPE = 24
+    MTTS = 24
+
+    @classmethod
+    def from_int(cls, code: int) -> Union["TC", int]:
+        try:
+            return cls(code)
+        except ValueError:
+            return code
+
+    def __repr__(self):
+        return self.name
 
 
-NEGOTIATORS = (_TC.WILL, _TC.WONT, _TC.DO, _TC.DONT)
-ACK_OPPOSITES = {_TC.WILL: _TC.DO, _TC.DO: _TC.WILL}
-NEG_OPPOSITES = {_TC.WILL: _TC.DONT, _TC.DO: _TC.WONT}
+NEGOTIATORS = (TC.WILL, TC.WONT, TC.DO, TC.DONT)
+ACK_OPPOSITES = {TC.WILL: TC.DO, TC.DO: TC.WILL}
+NEG_OPPOSITES = {TC.WILL: TC.DONT, TC.DO: TC.WONT}
 
 
 class TelnetInMessageType(IntEnum):
@@ -58,7 +68,6 @@ class TelnetInMessageType(IntEnum):
     CMD = 2
     GMCP = 3
     MSSP = 4
-    UPDATE = 5
 
 
 class TelnetInMessage:
@@ -111,43 +120,48 @@ class TelnetFrame:
         self.msg_type = msg_type
         self.data = data
 
+    def __repr__(self):
+        return f"<{self.__class__.__name__}: {self.msg_type.name} - {self.data}>"
+
     @classmethod
     def parse(cls, buffer: Union[bytes, bytearray]) -> Tuple[Optional["TelnetFrame"], int]:
         if not len(buffer) > 0:
             return None, 0
-        if buffer[0] == _TC.IAC:
+        if buffer[0] == TC.IAC:
             if len(buffer) < 2:
                 # not enough bytes available to do anything.
                 return None, 0
             else:
-                if buffer[1] == _TC.IAC:
-                    return cls(TelnetFrameType.DATA, buffer[1]), 2
+                if buffer[1] == TC.IAC:
+                    return cls(TelnetFrameType.DATA, TC.IAC), 2
                 elif buffer[1] in NEGOTIATORS:
                     if len(buffer) > 2:
-                        return cls(TelnetFrameType.NEGOTIATION, (buffer[1], buffer[2])), 3
+                        option = TC.from_int(buffer[2])
+                        return cls(TelnetFrameType.NEGOTIATION, (TC(buffer[1]), option)), 3
                     else:
                         # it's a negotiation, but we need more.
                         return None, 0
-                elif buffer[1] == _TC.SB:
+                elif buffer[1] == TC.SB:
                     if len(buffer) >= 5:
                         match = bytearray()
-                        match.append(_TC.IAC)
-                        match.append(_TC.SE)
+                        match.append(TC.IAC)
+                        match.append(TC.SE)
                         idx = buffer.find(match)
                         if idx == -1:
                             return None, 0
                         # hooray, idx is the beginning of our ending IAC SE!
-                        option = buffer[2]
+                        option = TC.from_int(buffer[2])
                         data = buffer[3:idx]
                         return cls(TelnetFrameType.SUBNEGOTIATION, (option, data)), 5 + len(data)
                     else:
                         # it's a subnegotiate, but we need more.
                         return None, 0
                 else:
-                    return cls(TelnetFrameType.COMMAND, buffer[1]), 2
+                    option = TC.from_int(buffer[1])
+                    return cls(TelnetFrameType.COMMAND, option), 2
         else:
             # we are dealing with 'just data!'
-            idx = buffer.find(_TC.IAC)
+            idx = buffer.find(TC.IAC)
             if idx == -1:
                 # no idx. consume entire remaining buffer.
                 return cls(TelnetFrameType.DATA, bytes(buffer)), len(buffer)
@@ -202,49 +216,49 @@ class TelnetOptionHandler:
         pass
 
     def negotiate(self, cmd: int, imsg: _InternalMsg):
-        if cmd == _TC.WILL:
+        if cmd == TC.WILL:
             if self.support_remote:
                 if self.remote.negotiating:
                     self.remote.negotiating = False
                     if not self.remote.enabled:
                         self.remote.enabled = True
-                        imsg.protocol.send_negotiate(_TC.DO, self.opcode)
+                        imsg.protocol.send_negotiate(TC.DO, self.opcode, imsg)
                         imsg.changed['remote'][self.opname] = True
                         self.enable_remote(imsg)
                         if self.opcode in imsg.protocol.handshakes.remote:
                             imsg.protocol.handshakes.remote.remove(self.opcode)
                 else:
                     self.remote.enabled = True
-                    imsg.protocol.send_negotiate(_TC.DO, self.opcode)
+                    imsg.protocol.send_negotiate(TC.DO, self.opcode, imsg)
                     imsg.changed['remote'][self.opname] = True
                     self.enable_remote(imsg)
                     if self.opcode in imsg.protocol.handshakes.remote:
                         imsg.protocol.handshakes.remote.remove(self.opcode)
             else:
-                imsg.protocol.send_negotiate(_TC.DONT, self.opcode)
+                imsg.protocol.send_negotiate(TC.DONT, self.opcode)
 
-        elif cmd == _TC.DO:
+        elif cmd == TC.DO:
             if self.support_local:
                 if self.local.negotiating:
                     self.local.negotiating = False
                     if not self.local.enabled:
                         self.local.enabled = True
-                        imsg.protocol.send_negotiate(_TC.WILL, self.opcode)
+                        imsg.protocol.send_negotiate(TC.WILL, self.opcode, imsg)
                         imsg.changed['local'][self.opname] = True
                         self.enable_local(imsg)
                         if self.opcode in imsg.protocol.handshakes.local:
                             imsg.protocol.handshakes.local.remove(self.opcode)
                 else:
                     self.local.enabled = True
-                    imsg.protocol.send_negotiate(_TC.WILL, self.opcode)
+                    imsg.protocol.send_negotiate(TC.WILL, self.opcode, imsg)
                     imsg.changed['local'][self.opname] = True
                     self.enable_local(imsg)
                     if self.opcode in imsg.protocol.handshakes.local:
                         imsg.protocol.handshakes.local.remove(self.opcode)
             else:
-                imsg.protocol.send_negotiate(_TC.DONT, self.opcode)
+                imsg.protocol.send_negotiate(TC.DONT, self.opcode)
 
-        elif cmd == _TC.WONT:
+        elif cmd == TC.WONT:
             if self.remote.enabled:
                 imsg.changed['remote'][self.opname] = False
                 self.disable_remote(imsg)
@@ -253,7 +267,7 @@ class TelnetOptionHandler:
                     if self.opcode in imsg.protocol.handshakes.remote:
                         imsg.protocol.handshakes.remote.remove(self.opcode)
 
-        elif cmd == _TC.DONT:
+        elif cmd == TC.DONT:
             if self.local.enabled:
                 imsg.changed['local'][self.opname] = False
                 self.disable_local(imsg)
@@ -276,7 +290,8 @@ class TelnetOptionHandler:
 
 
 class MCCP2Handler(TelnetOptionHandler):
-    opcode = _TC.MCCP2
+    opcode = TC.MCCP2
+    opname = 'mccp2'
     support_local = True
     start_will = True
     hs_local = [opcode]
@@ -291,8 +306,9 @@ class MCCP2Handler(TelnetOptionHandler):
         imsg.protocol.out_compressor = None
 
 
-class TTYPEHandler(TelnetOptionHandler):
-    opcode = _TC.TTYPE
+class MTTSHandler(TelnetOptionHandler):
+    opcode = TC.MTTS
+    opname = 'mtts'
     support_remote = True
     start_do = True
     hs_remote = [opcode]
@@ -320,11 +336,7 @@ class TTYPEHandler(TelnetOptionHandler):
         imsg.protocol.send_subnegotiate(self.opcode, [1], imsg)
 
     def enable_remote(self, imsg: _InternalMsg):
-        imsg.changed['remote']['mtts'] = True
         self.request(imsg)
-
-    def disable_remote(self, imsg: _InternalMsg):
-        imsg.changed['remote']['mtts'] = False
 
     def subnegotiate(self, data: bytes, imsg: _InternalMsg):
         if data == self.previous:
@@ -434,7 +446,8 @@ class MNEShandler(TelnetOptionHandler):
     """
     Not ready. do not enable.
     """
-    opcode = _TC.MNES
+    opcode = TC.MNES
+    opname = 'mnes'
     start_do = True
     support_remote = True
     hs_remote = [opcode]
@@ -445,7 +458,8 @@ class MCCP3Handler(TelnetOptionHandler):
     Note: Disabled because I can't get this working in tintin++
     It works, but not in conjunction with MCCP2.
     """
-    opcode = _TC.MCCP3
+    opcode = TC.MCCP3
+    opname = 'mccp3'
     support_local = True
     start_will = True
     hs_local = [opcode]
@@ -460,7 +474,8 @@ class MCCP3Handler(TelnetOptionHandler):
 
 
 class NAWSHandler(TelnetOptionHandler):
-    opcode = _TC.NAWS
+    opcode = TC.NAWS
+    opname = 'naws'
     support_remote = True
     start_do = True
 
@@ -475,41 +490,30 @@ class NAWSHandler(TelnetOptionHandler):
 
 
 class SGAHandler(TelnetOptionHandler):
-    opcode = _TC.SGA
+    opcode = TC.SGA
+    opname = 'suppress_ga'
     start_will = True
     support_local = True
 
     def enable_local(self, imsg: _InternalMsg):
-        imsg.changed['local']['suppress_ga'] = True
         imsg.protocol.sga = True
 
     def disable_local(self, imsg: _InternalMsg):
-        imsg.changed['local']['suppress_ga'] = False
         imsg.protocol.sga = False
 
 
 class LinemodeHandler(TelnetOptionHandler):
-    opcode = _TC.LINEMODE
+    opcode = TC.LINEMODE
+    opname = 'linemode'
     start_do = True
     support_remote = True
 
-    def enable_remote(self, imsg: _InternalMsg):
-        imsg.changed['remote']['linemode'] = True
-
-    def disable_remote(self, imsg: _InternalMsg):
-        imsg.changed['remote']['linemode'] = False
-
 
 class MSSPHandler(TelnetOptionHandler):
-    opcode = _TC.MSSP
+    opcode = TC.MSSP
+    opname = 'mssp'
     start_will = True
     support_local = True
-
-    def enable_local(self, imsg: _InternalMsg):
-        imsg.changed['local']['mssp'] = True
-
-    def disable_local(self, imsg: _InternalMsg):
-        imsg.changed['local']['mssp'] = True
 
     def send(self, data: Dict[str, str], imsg: _InternalMsg):
         out = bytearray()
@@ -522,7 +526,7 @@ class MSSPHandler(TelnetOptionHandler):
 
 
 class TelnetConnection:
-    handler_classes = [MCCP2Handler, TTYPEHandler, NAWSHandler, SGAHandler, LinemodeHandler, MSSPHandler]
+    handler_classes = [MCCP2Handler, MTTSHandler, NAWSHandler, SGAHandler, LinemodeHandler, MSSPHandler]
 
     __slots__ = ['cmdbuff', 'handlers', 'out_compressor', 'handshakes', 'app_linemode', 'sga']
 
@@ -537,12 +541,12 @@ class TelnetConnection:
     def start(self, out: bytearray):
         for k, v in self.handlers.items():
             if v.start_will:
-                out.extend(bytearray([_TC.IAC, _TC.WILL, k]))
+                out.extend(bytearray([TC.IAC, TC.WILL, k]))
                 v.local.negotiating = True
                 v.local.asked = True
 
             if v.start_do:
-                out.extend(bytearray([_TC.IAC, _TC.DO, k]))
+                out.extend(bytearray([TC.IAC, TC.DO, k]))
                 v.remote.negotiating = True
                 v.remote.asked = True
 
@@ -575,15 +579,15 @@ class TelnetConnection:
         self.send_bytes(data, imsg)
 
     def send_mssp(self, data: Dict[str, str], imsg):
-        self.handlers[_TC.MSSP].send(data, imsg)
+        self.handlers[TC.MSSP].send(data, imsg)
 
     def send_command(self, data: int, imsg: _InternalMsg):
         self.send_bytes(bytes([data]), imsg)
 
     def send_gmcp(self, data, imsg: _InternalMsg):
-        self.handlers[_TC.GMCP].send(data, imsg)
+        self.handlers[TC.GMCP].send(data, imsg)
 
-    def process_output_message(self, msg: TelnetOutMessage, out_buffer: bytearray):
+    def process_out_message(self, msg: TelnetOutMessage, out_buffer: bytearray):
         imsg = _InternalMsg(self, out_buffer, list())
 
         if msg.msg_type == TelnetOutMessageType.LINE:
@@ -601,7 +605,9 @@ class TelnetConnection:
         elif msg.msg_type == TelnetOutMessageType.GMCP:
             self.send_gmcp(msg.data, imsg)
 
-    def process_input_message(self, msg: TelnetFrame, out_buffer: bytearray, out_events: List[TelnetInMessage]):
+        return imsg.changed
+
+    def process_frame(self, msg: TelnetFrame, out_buffer: bytearray, out_events: List[TelnetInMessage]) -> dict:
         imsg = _InternalMsg(self, out_buffer, out_events)
         
         if msg.msg_type == TelnetFrameType.DATA:
@@ -615,10 +621,9 @@ class TelnetConnection:
         
         if len(imsg.out_buffer):
             if not self.sga:
-                self.send_bytes(bytes([_TC.GA]), imsg)
+                self.send_bytes(bytes([TC.GA]), imsg)
 
-        if imsg.changed:
-            out_events.append(TelnetInMessage(TelnetInMessageType.UPDATE, dict(imsg.changed)))
+        return imsg.changed
 
     def handle_command(self, cmd, imsg: _InternalMsg):
         pass
@@ -627,7 +632,7 @@ class TelnetConnection:
         if self.app_linemode:
             self.cmdbuff.extend(data)
             while True:
-                idx = self.cmdbuff.find(_TC.LF)
+                idx = self.cmdbuff.find(TC.LF)
                 if idx == -1:
                     break
                 found = self.cmdbuff[:idx]
@@ -642,7 +647,7 @@ class TelnetConnection:
     def negotiate(self, cmd: int, option: int, imsg: _InternalMsg):
         handler = self.handlers.get(option, None)
         if handler:
-            handler.negotiate(cmd)
+            handler.negotiate(cmd, imsg)
         else:
             response = NEG_OPPOSITES.get(cmd, None)
             self.send_negotiate(response, option, imsg)
@@ -653,12 +658,12 @@ class TelnetConnection:
             handler.subnegotiate(data, imsg)
 
     def send_negotiate(self, cmd: int, option: int, imsg: _InternalMsg):
-        self.send_bytes(bytes([_TC.IAC, cmd, option]), imsg)
+        self.send_bytes(bytes([TC.IAC, cmd, option]), imsg)
 
     def send_subnegotiate(self, cmd: int, data: bytes, imsg: _InternalMsg):
-        out = bytearray([_TC.IAC, _TC.SB, cmd])
+        out = bytearray([TC.IAC, TC.SB, cmd])
         out.extend(data)
-        out.extend([_TC.IAC, _TC.SE])
+        out.extend([TC.IAC, TC.SE])
         self.send_bytes(out, imsg)
 
     def send_bytes(self, data: Union[bytes, bytearray], imsg: _InternalMsg):

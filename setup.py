@@ -54,7 +54,7 @@ setup(
     version=get_version(),
     author="Volund",
     maintainer="Volund",
-    url="https://github.com/volundmush/mudtelnet",
+    url="https://github.com/volundmush/mudtelnet-python",
     description="",
     license="???",
     long_description="""
@@ -62,7 +62,7 @@ setup(
     """,
     long_description_content_type="text/markdown",
     packages=find_packages(),
-    install_requires=get_requirements(),
+   # install_requires=get_requirements(),
     package_data={"": package_data()},
     zip_safe=False,
     classifiers=[
