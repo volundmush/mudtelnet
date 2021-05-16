@@ -1,2 +1,3 @@
-from .mudtelnet import TelnetFrame, TelnetFrameType, TelnetConnection
-from .mudtelnet import TelnetInMessage, TelnetInMessageType, TelnetOutMessage, TelnetOutMessageType
+from mudtelnet import TelnetConnection, TelnetFrame, TelnetInMessage, TelnetInMessageType
+from mudtelnet import TelnetOutMessageType, TelnetOutMessage
+

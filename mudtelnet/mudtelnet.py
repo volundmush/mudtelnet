@@ -170,6 +170,14 @@ class TelnetFrame:
                 data = buffer[:idx]
                 return cls(TelnetFrameType.DATA, data), len(data)
 
+    @classmethod
+    def parse_consume(cls, buffer: bytearray) -> Optional["TelnetFrame"]:
+        frame, size = cls.parse(buffer)
+        if frame:
+            del buffer[:size]
+            return frame
+        return None
+
 
 class TelnetOptionPerspective:
     
@@ -336,6 +344,7 @@ class MTTSHandler(TelnetOptionHandler):
         imsg.protocol.send_subnegotiate(self.opcode, [1], imsg)
 
     def enable_remote(self, imsg: _InternalMsg):
+        imsg.protocol.handshakes.special.update(self.hs_special)
         self.request(imsg)
 
     def subnegotiate(self, data: bytes, imsg: _InternalMsg):
@@ -464,14 +473,6 @@ class MCCP3Handler(TelnetOptionHandler):
     start_will = True
     hs_local = [opcode]
 
-    def subnegotiate(self, data: bytes, imsg: _InternalMsg):
-        if not self.owner.in_compress:
-            self.owner.in_compress = zlib.decompressobj()
-            if self.owner.inbox:
-                remaining = self.owner.in_compress.decompress(self.owner.inbox)
-                self.owner.inbox.clear()
-                self.owner.inbox.extend(remaining)
-
 
 class NAWSHandler(TelnetOptionHandler):
     opcode = TC.NAWS
@@ -554,8 +555,6 @@ class TelnetConnection:
                 self.handshakes.local.update(v.hs_local)
             if v.hs_remote:
                 self.handshakes.remote.update(v.hs_remote)
-            if v.hs_special:
-                self.handshakes.special.update(v.hs_special)
 
     def sanitize_text(self, data: Union[str, bytes, bytearray]) -> bytearray:
         data = bytearray(data)

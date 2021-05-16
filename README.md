@@ -11,7 +11,7 @@
 
 **Patreon:** https://www.patreon.com/volund
 
-**Home Repository:** https://github.com/volundmush/mudtelnet
+**Home Repository:** https://github.com/volundmush/mudtelnet-python
 
 ## TERMS AND CONDITIONS
 
