@@ -554,7 +554,7 @@ class TelnetConnection:
             if v.hs_remote:
                 self.handshakes.remote.update(v.hs_remote)
 
-    def sanitize_text(self, data: Union[str, bytes, bytearray]) -> bytearray:
+    def sanitize_text(self, data: Union[bytes, bytearray]) -> bytearray:
         data = bytearray(data)
         data = data.replace(b'\r', b'')
         data = data.replace(b'\n', b'\r\n')
@@ -562,16 +562,22 @@ class TelnetConnection:
         return data
 
     def send_line(self, data: Union[str, bytes, bytearray], imsg: _InternalMsg):
+        if isinstance(data, str):
+            data = data.encode()
         data = self.sanitize_text(data)
         if not data.endswith(b'\r\n'):
             data += b'\r\n'
         self.send_bytes(data, imsg)
 
     def send_text(self, data: Union[str, bytes, bytearray], imsg: _InternalMsg):
+        if isinstance(data, str):
+            data = data.encode()
         data = self.sanitize_text(data)
         self.send_bytes(data, imsg)
 
     def send_prompt(self, data: Union[str, bytes, bytearray], imsg: _InternalMsg):
+        if isinstance(data, str):
+            data = data.encode()
         data = self.sanitize_text(data)
         self.send_bytes(data, imsg)
 
