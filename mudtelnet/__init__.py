@@ -5,13 +5,15 @@ from collections import defaultdict
 
 
 class TC(IntEnum):
+    """
+    Collection of Telnet Codes as byte values.
+    """
     NULL = 0
     BEL = 7
     CR = 13
     LF = 10
     SGA = 3
     TELOPT_EOR = 25
-    NAWS = 31
     LINEMODE = 34
     EOR = 239
     SE = 240
@@ -23,6 +25,9 @@ class TC(IntEnum):
     DO = 253
     DONT = 254
     IAC = 255
+
+    # NAWS: Negotiate About Window Size
+    NAWS = 31
 
     # MNES: Mud New-Environ Standard
     MNES = 39
@@ -221,66 +226,39 @@ class TelnetOptionHandler:
     def subnegotiate(self, data: bytes, imsg: _InternalMsg):
         pass
 
+    def _negotiate(self, imsg: _InternalMsg, support: bool, state: TelnetOptionPerspective, ack: TC, neg: TC, callback, section):
+        if support:
+            if state.negotiating:
+                state.negotiating = False
+                if not state.enabled:
+                    state.enabled = True
+                    imsg.protocol.send_negotiate(ack, self.opcode, imsg)
+                    imsg.changed[section][self.opname] = True
+                    callback(imsg)
+            else:
+                self.remote.enabled = True
+                imsg.protocol.send_negotiate(ack, self.opcode, imsg)
+                imsg.changed[section][self.opname] = True
+                callback(imsg)
+        else:
+            imsg.protocol.send_negotiate(neg, self.opcode, imsg)
+
+    def _reject(self, imsg: _InternalMsg, state: TelnetOptionPerspective, callback, section):
+        if state.enabled:
+            imsg.changed[section][self.opname] = False
+            callback(imsg)
+            if state.negotiating:
+                state.negotiating = False
+
     def negotiate(self, cmd: int, imsg: _InternalMsg):
         if cmd == TC.WILL:
-            if self.support_remote:
-                if self.remote.negotiating:
-                    self.remote.negotiating = False
-                    if not self.remote.enabled:
-                        self.remote.enabled = True
-                        imsg.protocol.send_negotiate(TC.DO, self.opcode, imsg)
-                        imsg.changed['remote'][self.opname] = True
-                        self.enable_remote(imsg)
-                        if self.opcode in imsg.protocol.handshakes.remote:
-                            imsg.protocol.handshakes.remote.remove(self.opcode)
-                else:
-                    self.remote.enabled = True
-                    imsg.protocol.send_negotiate(TC.DO, self.opcode, imsg)
-                    imsg.changed['remote'][self.opname] = True
-                    self.enable_remote(imsg)
-                    if self.opcode in imsg.protocol.handshakes.remote:
-                        imsg.protocol.handshakes.remote.remove(self.opcode)
-            else:
-                imsg.protocol.send_negotiate(TC.DONT, self.opcode, imsg)
-
+            self._negotiate(imsg, self.support_remote, self.remote, TC.DO, TC.DONT, self.enable_remote, 'remote')
         elif cmd == TC.DO:
-            if self.support_local:
-                if self.local.negotiating:
-                    self.local.negotiating = False
-                    if not self.local.enabled:
-                        self.local.enabled = True
-                        imsg.protocol.send_negotiate(TC.WILL, self.opcode, imsg)
-                        imsg.changed['local'][self.opname] = True
-                        self.enable_local(imsg)
-                        if self.opcode in imsg.protocol.handshakes.local:
-                            imsg.protocol.handshakes.local.remove(self.opcode)
-                else:
-                    self.local.enabled = True
-                    imsg.protocol.send_negotiate(TC.WILL, self.opcode, imsg)
-                    imsg.changed['local'][self.opname] = True
-                    self.enable_local(imsg)
-                    if self.opcode in imsg.protocol.handshakes.local:
-                        imsg.protocol.handshakes.local.remove(self.opcode)
-            else:
-                imsg.protocol.send_negotiate(TC.DONT, self.opcode, imsg)
-
+            self._negotiate(imsg, self.support_local, self.local, TC.WILL, TC.WONT, self.enable_local, 'local')
         elif cmd == TC.WONT:
-            if self.remote.enabled:
-                imsg.changed['remote'][self.opname] = False
-                self.disable_remote(imsg)
-                if self.remote.negotiating:
-                    self.remote.negotiating = False
-                    if self.opcode in imsg.protocol.handshakes.remote:
-                        imsg.protocol.handshakes.remote.remove(self.opcode)
-
+            self._reject(imsg, self.remote, self.disable_remote, 'remote')
         elif cmd == TC.DONT:
-            if self.local.enabled:
-                imsg.changed['local'][self.opname] = False
-                self.disable_local(imsg)
-                if self.local.negotiating:
-                    self.local.negotiating = False
-                    if self.opcode in imsg.protocol.handshakes.local:
-                        imsg.protocol.handshakes.local.remove(self.opcode)
+            self._reject(imsg, self.local, self.disable_local, 'local')
 
     def enable_local(self, imsg: _InternalMsg):
         pass
