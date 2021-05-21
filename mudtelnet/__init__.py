@@ -241,7 +241,7 @@ class TelnetOptionHandler:
                     if self.opcode in imsg.protocol.handshakes.remote:
                         imsg.protocol.handshakes.remote.remove(self.opcode)
             else:
-                imsg.protocol.send_negotiate(TC.DONT, self.opcode)
+                imsg.protocol.send_negotiate(TC.DONT, self.opcode, imsg)
 
         elif cmd == TC.DO:
             if self.support_local:
@@ -262,7 +262,7 @@ class TelnetOptionHandler:
                     if self.opcode in imsg.protocol.handshakes.local:
                         imsg.protocol.handshakes.local.remove(self.opcode)
             else:
-                imsg.protocol.send_negotiate(TC.DONT, self.opcode)
+                imsg.protocol.send_negotiate(TC.DONT, self.opcode, imsg)
 
         elif cmd == TC.WONT:
             if self.remote.enabled:
@@ -524,8 +524,22 @@ class MSSPHandler(TelnetOptionHandler):
         imsg.protocol.send_subnegotiate(self.opcode, out, imsg)
 
 
+class MXPHandler(TelnetOptionHandler):
+    opcode = TC.MXP
+    opname = 'mxp'
+    support_local = True
+    start_will = True
+
+    def enable_local(self, imsg: _InternalMsg):
+        imsg.protocol.send_subnegotiate(self.opcode, b'', imsg)
+        imsg.changed['local']['mxp_active'] = True
+
+    def disable_local(self, imsg: _InternalMsg):
+        imsg.changed['local']['mxp_active'] = False
+
+
 class TelnetConnection:
-    handler_classes = [MCCP2Handler, MTTSHandler, NAWSHandler, SGAHandler, LinemodeHandler, MSSPHandler]
+    handler_classes = [MXPHandler, MCCP2Handler, MTTSHandler, NAWSHandler, SGAHandler, LinemodeHandler, MSSPHandler]
 
     __slots__ = ['cmdbuff', 'handlers', 'out_compressor', 'handshakes', 'app_linemode', 'sga']
 
