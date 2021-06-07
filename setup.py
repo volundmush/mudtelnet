@@ -21,6 +21,11 @@ def get_requirements():
             reqs.append(line)
     return reqs
 
+from os import path
+this_directory = path.abspath(path.dirname(__file__))
+with open(path.join(this_directory, 'README.md'), encoding='utf-8') as f:
+    long_description = f.read()
+
 
 # setup the package
 setup(
@@ -31,11 +36,8 @@ setup(
     url="https://github.com/volundmush/mudtelnet-python",
     description="Simple Telnet library optimized for the MUD subset of Telnet.",
     license="MIT",
-    long_description="""
-    A bare-bones, standalone, modular and easily-extended library for handling turning bytes from sockets into 
-    telnet events, and vice-versa. It does no networking and has no application logic, but is perfect for 
-    creating a MUD project around.
-    """,
+    long_description=long_description,
+    long_description_content_type='text/markdown',
     packages=["mudtelnet"],
    # install_requires=get_requirements(),
     zip_safe=False,
