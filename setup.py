@@ -40,7 +40,6 @@ setup(
     long_description_content_type='text/markdown',
     packages=["mudtelnet"],
    # install_requires=get_requirements(),
-    zip_safe=False,
     classifiers=[
         "Programming Language :: Python :: 3 :: Only",
         "Programming Language :: Python :: 3.5",
