@@ -1,740 +1,276 @@
-import zlib
+import typing
+import asyncio
+import traceback
+import json
+
+from dataclasses import dataclass, field
+
 from typing import Dict, Tuple, Optional, Union, List
-from enum import IntEnum
 from collections import defaultdict
 
+from .parser import TelnetCode, TelnetCommand, TelnetData, TelnetNegotiate, TelnetSubNegotiate, parse_telnet
+from .options import ALL_OPTIONS, TelnetOption
+from .utils import ensure_crlf
 
-class TC(IntEnum):
+@dataclass(slots=True)
+class MudClientCapabilities:
     """
-    Collection of Telnet Codes as byte values.
+    A dataclass that holds the capabilities of the client. This is updated as negotiations occur and statuses change.
+    It can be subclassed to add more fields as needed, if you need to implement more TelnetOption subtypes that aren't
+    covered here.
     """
-
-    NULL = 0
-    BEL = 7
-    CR = 13
-    LF = 10
-    SGA = 3
-    TELOPT_EOR = 25
-    LINEMODE = 34
-    EOR = 239
-    SE = 240
-    NOP = 241
-    GA = 249
-    SB = 250
-    WILL = 251
-    WONT = 252
-    DO = 253
-    DONT = 254
-    IAC = 255
-
-    # NAWS: Negotiate About Window Size
-    NAWS = 31
-
-    # MNES: Mud New-Environ Standard
-    MNES = 39
-
-    # MXP: Mud eXtension Protocol
-    MXP = 91
-
-    # MSSP: Mud Server Status Protocol
-    MSSP = 70
-
-    # MCCP - Mud Client Compression Protocol
-    MCCP2 = 86
-    MCCP3 = 87
-
-    # GMCP: Generic Mud Communication Protocol
-    GMCP = 201
-
-    # MSDP: Mud Server Data Protocol
-    MSDP = 69
-
-    # TTYPE - Terminal Type
-    MTTS = 24
-
-    @classmethod
-    def from_int(cls, code: int) -> Union["TC", int]:
-        try:
-            return cls(code)
-        except ValueError:
-            return code
-
-    def __repr__(self):
-        return self.name
-
-
-NEGOTIATORS = (TC.WILL, TC.WONT, TC.DO, TC.DONT)
-ACK_OPPOSITES = {TC.WILL: TC.DO, TC.DO: TC.WILL}
-NEG_OPPOSITES = {TC.WILL: TC.DONT, TC.DO: TC.WONT}
-
-
-class TelnetInMessageType(IntEnum):
-    LINE = 0
-    DATA = 1
-    CMD = 2
-    GMCP = 3
-    MSSP = 4
-
-
-class TelnetInMessage:
-    __slots__ = ["msg_type", "data"]
-
-    def __init__(self, msg_type: TelnetInMessageType, data):
-        self.msg_type = msg_type
-        self.data = data
-
-
-class TelnetOutMessageType(IntEnum):
-    LINE = 0
-    TEXT = 1
-    BYTES = 2
-    MSSP = 3
-    GMCP = 4
-    PROMPT = 5
-    COMMAND = 6
-
-
-class TelnetOutMessage:
-    __slots__ = ["msg_type", "data"]
-
-    def __init__(self, msg_type: TelnetOutMessageType, data):
-        self.msg_type = msg_type
-        self.data = data
-
-
-class _InternalMsg:
-    __slots__ = ["protocol", "out_buffer", "out_events", "changed"]
-
-    def __init__(
-        self, protocol, out_buffer: bytearray, out_events: List[TelnetInMessage]
-    ):
-        self.protocol = protocol
-        self.out_buffer: bytearray = out_buffer
-        self.out_events: List[TelnetInMessage] = out_events
-        self.changed: Dict = defaultdict(dict)
-
-
-class TelnetFrameType(IntEnum):
-    DATA = 0
-    NEGOTIATION = 1
-    SUBNEGOTIATION = 2
-    COMMAND = 3
-
-
-class TelnetFrame:
-    __slots__ = ["msg_type", "data"]
-
-    def __init__(self, msg_type: TelnetFrameType, data):
-        self.msg_type = msg_type
-        self.data = data
-
-    def __repr__(self):
-        return f"<{self.__class__.__name__}: {self.msg_type.name} - {self.data}>"
-
-    @classmethod
-    def parse(
-        cls, buffer: Union[bytes, bytearray]
-    ) -> Tuple[Optional["TelnetFrame"], int]:
-        if not len(buffer) > 0:
-            return None, 0
-        if buffer[0] == TC.IAC:
-            if len(buffer) < 2:
-                # not enough bytes available to do anything.
-                return None, 0
-            else:
-                if buffer[1] == TC.IAC:
-                    return cls(TelnetFrameType.DATA, TC.IAC), 2
-                elif buffer[1] in NEGOTIATORS:
-                    if len(buffer) > 2:
-                        option = TC.from_int(buffer[2])
-                        return (
-                            cls(TelnetFrameType.NEGOTIATION, (TC(buffer[1]), option)),
-                            3,
-                        )
-                    else:
-                        # it's a negotiation, but we need more.
-                        return None, 0
-                elif buffer[1] == TC.SB:
-                    if len(buffer) >= 5:
-                        match = bytearray()
-                        match.append(TC.IAC)
-                        match.append(TC.SE)
-                        idx = buffer.find(match)
-                        if idx == -1:
-                            return None, 0
-                        # hooray, idx is the beginning of our ending IAC SE!
-                        option = TC.from_int(buffer[2])
-                        data = buffer[3:idx]
-                        return (
-                            cls(TelnetFrameType.SUBNEGOTIATION, (option, data)),
-                            5 + len(data),
-                        )
-                    else:
-                        # it's a subnegotiate, but we need more.
-                        return None, 0
-                else:
-                    option = TC.from_int(buffer[1])
-                    return cls(TelnetFrameType.COMMAND, option), 2
-        else:
-            # we are dealing with 'just data!'
-            idx = buffer.find(TC.IAC)
-            if idx == -1:
-                # no idx. consume entire remaining buffer.
-                return cls(TelnetFrameType.DATA, bytes(buffer)), len(buffer)
-            else:
-                # There is an IAC ahead - consume up to it, and loop.
-                data = buffer[:idx]
-                return cls(TelnetFrameType.DATA, data), len(data)
-
-    @classmethod
-    def parse_consume(cls, buffer: bytearray) -> Optional["TelnetFrame"]:
-        frame, size = cls.parse(buffer)
-        if frame:
-            del buffer[:size]
-            return frame
-        return None
-
-
-class TelnetOptionPerspective:
-    __slots__ = ["enabled", "negotiating", "heard_answer", "asked"]
-
-    def __init__(self):
-        self.enabled = False
-        self.negotiating = False
-        self.heard_answer = False
-        self.asked = False
-
-
-class TelnetHandshakeHolder:
-    __slots__ = ["local", "remote", "special"]
-
-    def __init__(
-        self,
-    ):
-        self.local = set()
-        self.remote = set()
-        self.special = set()
-
-    def has_remaining(self):
-        return self.local or self.remote or self.special
-
-
-class TelnetOptionHandler:
-    opcode = 0
-    opname = None
-    support_local = False
-    support_remote = False
-    start_will = False
-    start_do = False
-    hs_local = []
-    hs_remote = []
-    hs_special = []
-
-    __slots__ = ["local", "remote"]
-
-    def __init__(self):
-        self.local = TelnetOptionPerspective()
-        self.remote = TelnetOptionPerspective()
-
-    def subnegotiate(self, data: bytes, imsg: _InternalMsg):
-        pass
-
-    def _negotiate(
-        self,
-        imsg: _InternalMsg,
-        support: bool,
-        state: TelnetOptionPerspective,
-        ack: TC,
-        neg: TC,
-        callback,
-        section,
-    ):
-        if support:
-            if state.negotiating:
-                state.negotiating = False
-                if not state.enabled:
-                    state.enabled = True
-                    imsg.protocol.send_negotiate(ack, self.opcode, imsg)
-                    imsg.changed[section][self.opname] = True
-                    callback(imsg)
-            else:
-                self.remote.enabled = True
-                imsg.protocol.send_negotiate(ack, self.opcode, imsg)
-                imsg.changed[section][self.opname] = True
-                callback(imsg)
-        else:
-            imsg.protocol.send_negotiate(neg, self.opcode, imsg)
-
-    def _reject(
-        self, imsg: _InternalMsg, state: TelnetOptionPerspective, callback, section
-    ):
-        if state.enabled:
-            imsg.changed[section][self.opname] = False
-            callback(imsg)
-            if state.negotiating:
-                state.negotiating = False
-
-    def negotiate(self, cmd: int, imsg: _InternalMsg):
-        if cmd == TC.WILL:
-            self._negotiate(
-                imsg,
-                self.support_remote,
-                self.remote,
-                TC.DO,
-                TC.DONT,
-                self.enable_remote,
-                "remote",
-            )
-        elif cmd == TC.DO:
-            self._negotiate(
-                imsg,
-                self.support_local,
-                self.local,
-                TC.WILL,
-                TC.WONT,
-                self.enable_local,
-                "local",
-            )
-        elif cmd == TC.WONT:
-            self._reject(imsg, self.remote, self.disable_remote, "remote")
-        elif cmd == TC.DONT:
-            self._reject(imsg, self.local, self.disable_local, "local")
-
-    def enable_local(self, imsg: _InternalMsg):
-        pass
-
-    def disable_local(self, imsg: _InternalMsg):
-        pass
-
-    def enable_remote(self, imsg: _InternalMsg):
-        pass
-
-    def disable_remote(self, imsg: _InternalMsg):
-        pass
-
-
-class MCCP2Handler(TelnetOptionHandler):
-    opcode = TC.MCCP2
-    opname = "mccp2"
-    support_local = True
-    start_will = True
-    hs_local = [opcode]
-
-    def enable_local(self, imsg: _InternalMsg):
-        imsg.changed["mccp2"]["active"] = True
-        imsg.protocol.send_subnegotiate(self.opcode, [], imsg)
-        imsg.protocol.out_compressor = zlib.compressobj(9)
-
-    def disable_local(self, imsg: _InternalMsg):
-        imsg.changed["mccp2"]["active"] = False
-        imsg.protocol.out_compressor = None
-
-
-class MTTSHandler(TelnetOptionHandler):
-    opcode = TC.MTTS
-    opname = "mtts"
-    support_remote = True
-    start_do = True
-    hs_remote = [opcode]
-    hs_special = [0, 1, 2]
-    # terminal capabilities and their codes
-    mtts = [
-        (128, "proxy"),
-        (64, "screen_reader"),
-        (32, "osc_color_palette"),
-        (16, "mouse_tracking"),
-        (8, "xterm256"),
-        (4, "utf8"),
-        (2, "vt100"),
-        (1, "ansi"),
-    ]
-
-    __slots__ = ["stage", "previous"]
-
-    def __init__(self):
-        super().__init__()
-        self.stage: int = 0
-        self.previous: Optional[bytes] = None
-
-    def request(self, imsg: _InternalMsg):
-        imsg.protocol.send_subnegotiate(self.opcode, [1], imsg)
-
-    def enable_remote(self, imsg: _InternalMsg):
-        imsg.protocol.handshakes.special.update(self.hs_special)
-        self.request(imsg)
-
-    def subnegotiate(self, data: bytes, imsg: _InternalMsg):
-        if data == self.previous:
-            # we're not going to learn anything new from this client...
-            for code in self.hs_special:
-                if code in imsg.protocol.handshakes.special:
-                    imsg.protocol.handshakes.special.remove(code)
-            self.previous = None
-
-        if data[0] == 0:
-            self.previous = data
-            data = data[1:]
-            data = data.decode(errors="ignore")
-            if not data:
-                return
-
-            if self.stage == 0:
-                self.receive_stage_0(data, imsg)
-                self.stage = 1
-                self.request(imsg)
-            elif self.stage == 1:
-                self.receive_stage_1(data, imsg)
-                self.stage = 2
-            elif self.stage == 2:
-                self.receive_stage_2(data, imsg)
-                self.stage = 3
-
-    def receive_stage_0(self, data: str, imsg: _InternalMsg):
-        # Code adapted from Evennia! Credit where credit is due.
-
-        # this is supposed to be the name of the client/terminal.
-        # For clients not supporting the extended TTYPE
-        # definition, subsequent calls will just repeat-return this.
-        clientname = data.upper()
-
-        if " " in clientname:
-            clientname, version = clientname.split(" ", 1)
-        else:
-            version = "UNKNOWN"
-        imsg.changed["mtts"]["client_name"] = clientname
-        imsg.changed["mtts"]["client_version"] = version
-
-        # use name to identify support for xterm256. Many of these
-        # only support after a certain version, but all support
-        # it since at least 4 years. We assume recent client here for now.
-        xterm256 = False
-        if clientname.startswith("MUDLET"):
-            # supports xterm256 stably since 1.1 (2010?)
-            xterm256 = version >= "1.1"
-            imsg.changed["mtts"]["force_endline"] = False
-
-        if clientname.startswith("TINTIN++"):
-            imsg.changed["mtts"]["force_endline"] = True
-
-        if (
-            clientname.startswith("XTERM")
-            or clientname.endswith("-256COLOR")
-            or clientname
-            in (
-                "ATLANTIS",  # > 0.9.9.0 (aug 2009)
-                "CMUD",  # > 3.04 (mar 2009)
-                "KILDCLIENT",  # > 2.2.0 (sep 2005)
-                "MUDLET",  # > beta 15 (sep 2009)
-                "MUSHCLIENT",  # > 4.02 (apr 2007)
-                "PUTTY",  # > 0.58 (apr 2005)
-                "BEIP",  # > 2.00.206 (late 2009) (BeipMu)
-                "POTATO",  # > 2.00 (maybe earlier)
-                "TINYFUGUE",  # > 4.x (maybe earlier)
-            )
-        ):
-            xterm256 = True
-
-        # all clients supporting TTYPE at all seem to support ANSI
-        if xterm256:
-            imsg.changed["mtts"]["xterm256"] = True
-            imsg.changed["mtts"]["ansi"] = True
-
-    def receive_stage_1(self, term: str, imsg: _InternalMsg):
-        # this is a term capabilities flag
-        tupper = term.upper()
-        # identify xterm256 based on flag
-        xterm256 = (
-            tupper.endswith("-256COLOR")
-            or tupper.endswith("XTERM")  # Apple Terminal, old Tintin
-            and not tupper.endswith("-COLOR")  # old Tintin, Putty
-        )
-        if xterm256:
-            imsg.changed["mtts"]["xterm256"] = True
-        imsg.changed["mtts"]["ttype"] = term
-
-    def receive_stage_2(self, option: str, imsg: _InternalMsg):
-        # the MTTS bitstring identifying term capabilities
-        if option.startswith("MTTS"):
-            option = option[4:].strip()
-            if option.isdigit():
-                # a number - determine the actual capabilities
-                option = int(option)
-                for k, v in {
-                    capability: True
-                    for bitval, capability in self.mtts
-                    if option & bitval > 0
-                }:
-                    imsg.changed["mtts"][k] = v
-            else:
-                # some clients send erroneous MTTS as a string. Add directly.
-                imsg.changed["mttts"]["mtts"] = True
-        imsg.changed["mtts"]["ttype"] = True
-
-
-class MNEShandler(TelnetOptionHandler):
+    client_name: str = "UNKNOWN"
+    client_version: str = "UNKNOWN"
+    encoding: str = "ascii"
+    color: int = 0
+    width: int = 78
+    height: int = 24
+    mccp2: bool = False
+    mccp2_enabled: bool = False
+    mccp3: bool = False
+    mccp3_enabled: bool = False
+    gmcp: bool = False
+    msdp: bool = False
+    mssp: bool = False
+    mslp: bool = False
+    mtts: bool = False
+    naws: bool = False
+    sga: bool = False
+    linemode: bool = False
+    force_endline: bool = False
+    screen_reader: bool = False
+    mouse_tracking: bool = False
+    vt100: bool = False
+    osc_color_palette: bool = False
+    proxy: bool = False
+    mnes: bool = False
+    tls_support: bool = False
+
+
+class MudTelnetProtocol:
     """
-    Not ready. do not enable.
+    This is the main class for handling Mud Telnet connections. It can be used as-is, or subclassed.
+    It's meant to be used with an asyncio. It doesn't provide any networking capabilities itself, however.
+
+    Using it involves primarily the following methods:
+    - async def start(self): This should be called first thing after hooking it up to any networking code. It will initiate
+        any Telnet Option negotiations and provides a list of asyncio.Events that can be awaited on to determine when the
+        negotiations are complete. We recommend a timeout on this, since many clients don't do anything with Telnet Options.
+    - async def receive_data(self, data: bytes) -> int: This is the main entry point for incoming data. Just dump all incoming bytes
+        into this method, and it will handle the rest.
+    - async def send_text(self, text: str): This is the main method for sending text to the client. It will automatically
+        convert and encode the text as needed. There are also send_mssp, send_gmcp, and send_line methods.
+    - async def output_stream(self): This is an async generator that yields bytes to be sent to the client. It should be used
+        in an async for loop. It's the main output mechanism.
+    - callbacks: This is a dictionary of callbacks that can be set to handle various events. The keys are "line", "command",
+        and "change_capabilities". The values should be async callables that accept the appropriate arguments. Just
+        check out how they're called in the code to see what they should look like.
+
     """
 
-    opcode = TC.MNES
-    opname = "mnes"
-    start_do = True
-    support_remote = True
-    hs_remote = [opcode]
+    def __init__(self, capabilities: MudClientCapabilities, supported_options: typing.List[typing.Type[TelnetOption]] = None,
+                 logger=None, text_encoding: str = "utf-8", json_library = None):
+        """
+        Initialize a MudTelnetProtocol instance.
 
+        Args:
+            capabilities (MudClientCapabilities): The capabilities of the client. This will be updated as negotiations
+                occur and statuses change. To observe these changes, you can set a callback for the "change_capabilities"
+                event.
+            supported_options (list): A list of TelnetOption classes that the server supports. If this is None, all
+                advanced features are disabled. It's recommended to use the ALL_OPTIONS list from the options module.
+            logger: The logger object to use for reporting errors.
+            text_encoding (str): The encoding to use for text. This is utf-8 by default. We recommend sticking to it.
+            json_library: An object which is compatible with json.loads and json.dumps. This is used for GMCP.
+                The default Python library will be used if not provided. orjson or similar are recommended.
+        """
+        self.capabilities = capabilities
+        self.logger = logger
+        self.text_encoding = text_encoding
+        self.supported_options = supported_options or list()
+        # Various callbacks with different call signatures will be stored here.
+        # set them after initializing with telnet.callbacks["name"] = some_async_callable.
+        self.callbacks: Dict[str, typing.Callable[..., typing.Awaitable[typing.Any]]] = {}
+        self.json_library = json_library or json
+        # Raw bytes come in and are appended to the _tn_in_buffer.
+        self._tn_in_buffer = bytearray()
+        # Private message queue that holds messages like TelnetData, TelnetCommand, TelnetNegotiate, TelnetSubNegotiate.
+        # Used by self.output_stream
+        self._tn_out_queue = asyncio.Queue()
+        # Holds text data sent by client that has yet to have a line ending.
+        self._tn_app_data = bytearray()
+        self._tn_options: dict[int, TelnetOption] = {}
+        # These are currently only used by MCCP2 and MCCP3. They cause byte transformations/encoding/decoding.
+        # It's probably not possible to have too many things mucking with bytes in/out. Really, MCCP2 and MCCP3 are
+        # terrible enough to deal with as it is.
+        self._out_transformers = list()
+        self._in_transformers = list()
 
-class MCCP3Handler(TelnetOptionHandler):
-    """
-    Note: Disabled because I can't get this working in tintin++
-    It works, but not in conjunction with MCCP2.
-    """
+        # Initialize all provided Telnet Option handlers.
+        for op in self.supported_options:
+            self._tn_options[op.code] = op(self)
 
-    opcode = TC.MCCP3
-    opname = "mccp3"
-    support_local = True
-    start_will = True
-    hs_local = [opcode]
+    async def start(self) -> typing.List[typing.Coroutine[typing.Any, typing.Any, typing.Literal[True]]]:
+        """
+        Fires off the initial barrage of negotiations and prepares events that signify end of negotiations.
 
+        This is meant to be used by the application via something like
+        asyncio.wait_for(asyncio.gather(*ops)),  perhaps with a timeout
+        in case a client doesn't respond.
+        """
+        for code, op in self._tn_options.items():
+            await op.start()
 
-class NAWSHandler(TelnetOptionHandler):
-    opcode = TC.NAWS
-    opname = "naws"
-    support_remote = True
-    start_do = True
+        ops = [op.negotiation.wait() for op in self._tn_options.values()]
 
-    def enable_remote(self, imsg: _InternalMsg):
-        imsg.changed["remote"]["naws"] = True
+        return ops
 
-    def subnegotiate(self, data: bytes, imsg: _InternalMsg):
-        if len(data) >= 4:
-            # NAWS is negotiated with 16bit words
-            imsg.changed["naws"]["width"] = int.from_bytes(
-                data[0:2], byteorder="big", signed=False
-            )
-            imsg.changed["naws"]["height"] = int.from_bytes(
-                data[2:2], byteorder="big", signed=False
-            )
+    async def receive_data(self, data: bytes) -> int:
+        """
+        This is the main entry point for incoming data.
+        It will process at most one TelnetMessage from the incoming data.
+        Extra bytes are held onto in the _tn_in_buffer until they can be processed.
 
+        It returns the size of the in_buffer in bytes after processing.
+        This is useful for determining if the buffer is growing or shrinking too much.
+        """
+        # Route all bytes through the incoming transformers. This is
+        # probably only MCCP3.
+        in_data = data
+        for op in self._in_transformers:
+            in_data = await op.transform_incoming_data(in_data)
 
-class SGAHandler(TelnetOptionHandler):
-    opcode = TC.SGA
-    opname = "suppress_ga"
-    start_will = True
-    support_local = True
+        self._tn_in_buffer.extend(data)
 
-    def enable_local(self, imsg: _InternalMsg):
-        imsg.protocol.sga = True
+        while True:
+            # Try to parse a message from the buffer
+            consumed, message = parse_telnet(self._tn_in_buffer)
+            if message is None:
+                break
+            # advance the buffer by the number of bytes consumed
+            del self._tn_in_buffer[consumed:]
+            # Do something with the message.
+            # If MCCP3 engages it will actually decompress self._tn_in_buffer in-place
+            # so it's safe to keep iterating.
+            await self._tn_at_telnet_message(message)
 
-    def disable_local(self, imsg: _InternalMsg):
-        imsg.protocol.sga = False
+        return len(self._tn_in_buffer)
 
+    async def change_capabilities(self, changes: dict[str, typing.Any]):
+        cb = self.callbacks.get("change_capabilities", None)
+        for key, value in changes.items():
+            setattr(self.capabilities, key, value)
+            if cb:
+                await cb(key, value)
 
-class LinemodeHandler(TelnetOptionHandler):
-    opcode = TC.LINEMODE
-    opname = "linemode"
-    start_do = True
-    support_remote = True
+    async def _tn_at_telnet_message(self, message):
+        """
+        Responds to data converted from raw data after possible decompression.
+        """
+        match message:
+            case TelnetData():
+                await self._tn_handle_data(message)
+            case TelnetCommand():
+                await self._tn_handle_command(message)
+            case TelnetNegotiate():
+                await self._tn_handle_negotiate(message)
+            case TelnetSubNegotiate():
+                await self._tn_handle_subnegotiate(message)
 
+    async def _tn_handle_data(self, message: TelnetData):
+        self._tn_app_data.extend(message.data)
 
-class MSSPHandler(TelnetOptionHandler):
-    opcode = TC.MSSP
-    opname = "mssp"
-    start_will = True
-    support_local = True
+        # scan self._app_data for lines ending in \r\n...
+        while True:
+            # Find the position of the next newline character
+            newline_pos = self._tn_app_data.find(b"\n")
+            if newline_pos == -1:
+                break  # No more newlines
 
-    def send(self, data: Dict[str, str], imsg: _InternalMsg):
-        out = bytearray()
-        for k, v in data.items():
-            out += 1
-            out += bytes(k)
-            out += 2
-            out += bytes(v)
-        imsg.protocol.send_subnegotiate(self.opcode, out, imsg)
-
-
-class MXPHandler(TelnetOptionHandler):
-    opcode = TC.MXP
-    opname = "mxp"
-    support_local = True
-    start_will = True
-
-    def enable_local(self, imsg: _InternalMsg):
-        imsg.protocol.send_subnegotiate(self.opcode, b"", imsg)
-        imsg.changed["local"]["mxp_active"] = True
-
-    def disable_local(self, imsg: _InternalMsg):
-        imsg.changed["local"]["mxp_active"] = False
-
-
-class TelnetConnection:
-    handler_classes = [
-        MXPHandler,
-        MCCP2Handler,
-        MTTSHandler,
-        NAWSHandler,
-        SGAHandler,
-        LinemodeHandler,
-        MSSPHandler,
-    ]
-
-    __slots__ = [
-        "cmdbuff",
-        "handlers",
-        "out_compressor",
-        "handshakes",
-        "app_linemode",
-        "sga",
-    ]
-
-    def __init__(self, app_linemode: bool = True, sga: bool = True):
-        self.cmdbuff = bytearray()
-        self.handlers = {hc.opcode: hc() for hc in self.handler_classes}
-        self.out_compressor = None
-        self.handshakes = TelnetHandshakeHolder()
-        self.app_linemode = app_linemode
-        self.sga = sga
-
-    def start(self, out: bytearray):
-        for k, v in self.handlers.items():
-            if v.start_will:
-                out.extend(bytearray([TC.IAC, TC.WILL, k]))
-                v.local.negotiating = True
-                v.local.asked = True
-
-            if v.start_do:
-                out.extend(bytearray([TC.IAC, TC.DO, k]))
-                v.remote.negotiating = True
-                v.remote.asked = True
-
-            if v.hs_local:
-                self.handshakes.local.update(v.hs_local)
-            if v.hs_remote:
-                self.handshakes.remote.update(v.hs_remote)
-
-    def sanitize_text(self, data: Union[bytes, bytearray]) -> bytearray:
-        data = bytearray(data)
-        data = data.replace(b"\r", b"")
-        data = data.replace(b"\n", b"\r\n")
-        data = data.replace(b"\xFF", b"\xFF\xFF")
-        return data
-
-    def send_line(self, data: Union[str, bytes, bytearray], imsg: _InternalMsg):
-        if isinstance(data, str):
-            data = data.encode()
-        data = self.sanitize_text(data)
-        if not data.endswith(b"\r\n"):
-            data += b"\r\n"
-        self.send_bytes(data, imsg)
-
-    def send_text(self, data: Union[str, bytes, bytearray], imsg: _InternalMsg):
-        if isinstance(data, str):
-            data = data.encode()
-        data = self.sanitize_text(data)
-        self.send_bytes(data, imsg)
-
-    def send_prompt(self, data: Union[str, bytes, bytearray], imsg: _InternalMsg):
-        if isinstance(data, str):
-            data = data.encode()
-        data = self.sanitize_text(data)
-        self.send_bytes(data, imsg)
-
-    def send_mssp(self, data: Dict[str, str], imsg):
-        self.handlers[TC.MSSP].send(data, imsg)
-
-    def send_command(self, data: int, imsg: _InternalMsg):
-        self.send_bytes(bytes([data]), imsg)
-
-    def send_gmcp(self, data, imsg: _InternalMsg):
-        self.handlers[TC.GMCP].send(data, imsg)
-
-    def process_out_message(self, msg: TelnetOutMessage, out_buffer: bytearray):
-        imsg = _InternalMsg(self, out_buffer, list())
-
-        if msg.msg_type == TelnetOutMessageType.LINE:
-            self.send_line(msg.data, imsg)
-        elif msg.msg_type == TelnetOutMessageType.TEXT:
-            self.send_text(msg.data, imsg)
-        elif msg.msg_type == TelnetOutMessageType.MSSP:
-            self.send_mssp(msg.data, imsg)
-        elif msg.msg_type == TelnetOutMessageType.BYTES:
-            self.send_bytes(msg.data, imsg)
-        elif msg.msg_type == TelnetOutMessageType.COMMAND:
-            self.send_command(msg.data, imsg)
-        elif msg.msg_type == TelnetOutMessageType.PROMPT:
-            self.send_prompt(msg.data, imsg)
-        elif msg.msg_type == TelnetOutMessageType.GMCP:
-            self.send_gmcp(msg.data, imsg)
-
-        return imsg.changed
-
-    def process_frame(
-        self, msg: TelnetFrame, out_buffer: bytearray, out_events: List[TelnetInMessage]
-    ) -> dict:
-        imsg = _InternalMsg(self, out_buffer, out_events)
-
-        if msg.msg_type == TelnetFrameType.DATA:
-            self.handle_data(msg.data, imsg)
-        elif msg.msg_type == TelnetFrameType.COMMAND:
-            self.handle_command(msg.data, imsg)
-        elif msg.msg_type == TelnetFrameType.NEGOTIATION:
-            self.negotiate(msg.data[0], msg.data[1], imsg)
-        elif msg.msg_type == TelnetFrameType.SUBNEGOTIATION:
-            self.subnegotiate(msg.data[0], msg.data[1], imsg)
-
-        if len(imsg.out_buffer):
-            if not self.sga:
-                self.send_bytes(bytes([TC.GA]), imsg)
-
-        return imsg.changed
-
-    def handle_command(self, cmd, imsg: _InternalMsg):
-        pass
-
-    def handle_data(self, data: Union[bytes, bytearray], imsg: _InternalMsg):
-        if self.app_linemode:
-            self.cmdbuff.extend(data)
-            while True:
-                idx = self.cmdbuff.find(TC.LF)
-                if idx == -1:
-                    break
-                found = self.cmdbuff[:idx]
-                self.cmdbuff = self.cmdbuff[idx + 1 :]
-                if found.endswith(b"\r"):
-                    del found[-1]
-                if found:
-                    imsg.out_events.append(
-                        TelnetInMessage(TelnetInMessageType.LINE, found)
-                    )
-        else:
-            imsg.out_events.append(
-                TelnetInMessage(TelnetInMessageType.DATA, bytes(data))
+            # Extract the line, trimming \r\n at the end
+            line = (
+                self._tn_app_data[:newline_pos]
+                .rstrip(b"\r\n")
+                .decode(self.text_encoding, errors="ignore")
             )
 
-    def negotiate(self, cmd: int, option: int, imsg: _InternalMsg):
-        handler = self.handlers.get(option, None)
-        if handler:
-            handler.negotiate(cmd, imsg)
-        else:
-            response = NEG_OPPOSITES.get(cmd, None)
-            self.send_negotiate(response, option, imsg)
+            # Remove the processed line from _app_data
+            self._tn_app_data = self._tn_app_data[newline_pos + 1 :]
 
-    def subnegotiate(self, option: int, data: bytes, imsg: _InternalMsg):
-        handler = self.handlers.get(option, None)
-        if handler:
-            handler.subnegotiate(data, imsg)
+            # Call the line callback if it exists
+            if cb := self.callbacks.get("line", None):
+                await cb(line)
 
-    def send_negotiate(self, cmd: int, option: int, imsg: _InternalMsg):
-        self.send_bytes(bytes([TC.IAC, cmd, option]), imsg)
+    async def _tn_handle_negotiate(self, message: TelnetNegotiate):
+        if op := self._tn_options.get(message.option, None):
+            await op.at_receive_negotiate(message)
+            return
 
-    def send_subnegotiate(self, cmd: int, data: bytes, imsg: _InternalMsg):
-        out = bytearray([TC.IAC, TC.SB, cmd])
-        out.extend(data)
-        out.extend([TC.IAC, TC.SE])
-        self.send_bytes(out, imsg)
+        # but if we don't have any handler for it...
+        match message.command:
+            case TelnetCode.WILL:
+                msg = TelnetNegotiate(TelnetCode.DONT, message.option)
+                await self._tn_out_queue.put(msg)
+            case TelnetCode.DO:
+                msg = TelnetNegotiate(TelnetCode.WONT, message.option)
+                await self._tn_out_queue.put(msg)
 
-    def send_bytes(self, data: Union[bytes, bytearray], imsg: _InternalMsg):
-        if self.out_compressor:
-            data = self.out_compressor.compress(data) + self.out_compressor.flush(
-                zlib.Z_SYNC_FLUSH
-            )
-        imsg.out_buffer.extend(data)
+    async def _tn_handle_subnegotiate(self, message: TelnetSubNegotiate):
+        if op := self._tn_options.get(message.option, None):
+            await op.at_receive_subnegotiate(message)
+
+    async def _tn_handle_command(self, message: TelnetCommand):
+        if cb := self.callbacks.get("command", None):
+            await cb(message.command)
+
+    async def _tn_encode_outgoing_data(self, data: typing.Union[TelnetData, TelnetCommand, TelnetNegotiate, TelnetSubNegotiate]) -> bytes:
+        # First we'll convert our object to bytes. It might be a TelnetData, TelnetCommand,
+        # TelnetNegotiate, or TelnetSubNegotiate.
+        encoded = bytes(data)
+        # pass it through any applicable transformations. This is probably only MCCP2.
+        for op in self._out_transformers:
+            encoded = await op.transform_outgoing_data(encoded)
+        # return the encoded data.
+        return encoded
+
+    async def output_stream(self) -> typing.AsyncGenerator[bytes, None]:
+        """
+        This is the main output stream generator. It takes data from the _tn_out_queue,
+        encodes it as bytes, and yields it the caller. This is meant to be used in an
+        async for loop like so:
+
+        async for data in protocol.output_stream():
+            await writer.write(data)
+
+        """
+        while data := await self._tn_out_queue.get():
+            encoded = await self._tn_encode_outgoing_data(data)
+            # certain options need to know when things happen. Primarily MCCP2. So we'll notify them
+            # of the data that we now know "has been sent to the client".
+            match data:
+                case TelnetNegotiate():
+                    if op := self._tn_options.get(data.option, None):
+                        await op.at_send_negotiate(data)
+                case TelnetSubNegotiate():
+                    if op := self._tn_options.get(data.option, None):
+                        await op.at_send_subnegotiate(data)
+            yield encoded
+
+    async def send_line(self, text: str):
+        if not text.endswith("\n"):
+            text += "\n"
+        await self.send_text(text)
+
+    async def send_text(self, text: str):
+        converted = ensure_crlf(text)
+        await self._tn_out_queue.put(TelnetData(data=converted.encode()))
+
+    async def send_gmcp(self, command: str, data=None):
+        if self.capabilities.gmcp:
+            op = self._tn_options.get(TelnetCode.GMCP)
+            await op.send_gmcp(command, data)
+
+    async def send_mssp(self, data: dict[str, str]):
+        if self.capabilities.mssp:
+            op = self._tn_options.get(TelnetCode.MSSP)
+            await op.send_mssp(data)

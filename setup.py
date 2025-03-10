@@ -32,7 +32,7 @@ with open(path.join(this_directory, "README.md"), encoding="utf-8") as f:
 # setup the package
 setup(
     name="mudtelnet",
-    version="0.8.0",
+    version="0.9.0",
     author="Volund",
     maintainer="Volund",
     url="https://github.com/volundmush/mudtelnet-python",
@@ -52,7 +52,7 @@ setup(
         "Topic :: Games/Entertainment :: Simulation",
         "Topic :: Software Development :: Libraries :: Application Frameworks",
     ],
-    python_requires=">=3.5",
+    python_requires=">=3.12",
     project_urls={
         "Source": "https://github.com/volundmush/mudtelnet-python",
         "Issue tracker": "https://github.com/volundmush/mudtelnet-python/issues",
