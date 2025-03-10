@@ -1,4 +1,4 @@
-# Volund's MudTelnet library for Python
+# Volund's AioMudTelnet library for Python
 
 ## CONTACT INFO
 **Name:** Volund
@@ -51,8 +51,8 @@ Glad you asked.
 ```python
 import asyncio
 import typing
-from mudtelnet import MudTelnetProtocol, MudClientCapabilities
-from mudtelnet.options import ALL_OPTIONS
+from aiomudtelnet import MudTelnetProtocol, MudClientCapabilities
+from aiomudtelnet.options import ALL_OPTIONS
 
 class TelnetConnection:
     def __init__(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):

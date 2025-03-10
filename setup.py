@@ -31,16 +31,16 @@ with open(path.join(this_directory, "README.md"), encoding="utf-8") as f:
 
 # setup the package
 setup(
-    name="mudtelnet",
+    name="aiomudtelnet",
     version="0.9.0",
-    author="Volund",
-    maintainer="Volund",
-    url="https://github.com/volundmush/mudtelnet-python",
+    author="VolundMush",
+    maintainer="VolundMush",
+    url="https://github.com/volundmush/aiomudtelnet",
     description="Simple Telnet library optimized for the MUD subset of Telnet.",
     license="MIT",
     long_description=long_description,
     long_description_content_type="text/markdown",
-    packages=["mudtelnet"],
+    packages=["aiomudtelnet"],
     # install_requires=get_requirements(),
     classifiers=[
         "Programming Language :: Python :: 3 :: Only",
@@ -54,8 +54,8 @@ setup(
     ],
     python_requires=">=3.12",
     project_urls={
-        "Source": "https://github.com/volundmush/mudtelnet-python",
-        "Issue tracker": "https://github.com/volundmush/mudtelnet-python/issues",
+        "Source": "https://github.com/volundmush/aiomudtelnet",
+        "Issue tracker": "https://github.com/volundmush/aiomudtelnet/issues",
         "Patreon": "https://www.patreon.com/volund",
     },
 )
