@@ -93,25 +93,21 @@ class TelnetOption:
                         await self.at_local_reject()
 
     async def at_local_reject(self):
-        self.protocol.logger.info(f"Local {self.code.name} rejected")
         self.negotiation.set()
 
     async def at_remote_reject(self):
-        self.protocol.logger.info(f"Remote {self.code.name} rejected")
         self.negotiation.set()
 
     async def at_receive_subnegotiate(self, msg: TelnetSubNegotiate):
         pass
 
     async def at_local_enable(self):
-        self.protocol.logger.info(f"Local {self.code.name} enabled")
         self.negotiation.set()
 
     async def at_local_disable(self):
         pass
 
     async def at_remote_enable(self):
-        self.protocol.logger.info(f"Remote {self.code.name} enabled")
         self.negotiation.set()
 
     async def at_remote_disable(self):
