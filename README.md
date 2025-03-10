@@ -137,15 +137,21 @@ class TelnetConnection:
   __Q:__ I found a bug! What do I do?  
   __A:__ Post it on this GitHub's Issues tracker. I'll see what I can do when I have time. ... or you can try to fix it yourself and submit a Pull Request. That's cool too.
 
+  __Q:__ I want a feature added! What do I do?  
+  __A:__ Post it on this GitHub's Issues tracker. I'll see what I can do when I have time. ... or you can try to add it yourself and submit a Pull Request. That's cool too.
+
   __Q:__ But... I want a MUD! Where do I start making a MUD?  
   __A:__ Coming soon...
 
   __Q:__ Any other libraries I should look into for making a MUD?  
-  __A:__ [Evennia](https://www.evennia.com/) is a full-fledged MUD SDK in python. If it suits your needs, I recommend using it instead of starting from scratch. If you ARE starting from scratch, then [Rich](https://github.com/Textualize/rich) offers some amazing ANSI coloring support that works well with aiomudtelnet. Just give each connection a rich.Console.Console, use its record feature, alter color systems and other things by responding to capability changes, and then send the recorded output to the client.
+  __A:__ [Evennia](https://www.evennia.com/) is a full-fledged MUD SDK in python. If it suits your needs, I recommend using it instead of starting from scratch. If you ARE starting from scratch, then [Rich](https://github.com/Textualize/rich) offers some amazing ANSI coloring support that works well with aiomudtelnet. Just give each connection a rich.console.Console, use its record feature, alter color systems and other things by responding to capability changes, and then send the recorded output to the client.
+
+  __Q:__ It's 2025 and people are still using telnet for anything?  
+  __A:__ :irritable growl:
 
 ## Special Thanks
   * The [Evennia](https://www.evennia.com/) community. I've learned a lot from their code.
   * The [BeipMU](https://beipdev.github.io/BeipMU/) project. Their client has been amazing for testing this library.
-  * The TinTin++ community. Their archive on [MUD protocols](https://tintin.mudhalla.net/protocols/) is n absolute godsend and a treasure.
+  * The TinTin++ community. Their archive on [MUD protocols](https://tintin.mudhalla.net/protocols/) is an absolute godsend and a treasure.
   * All of my Patrons on Patreon.
   * Anyone who contributes to this project or my other ones.
